@@ -37,16 +37,43 @@
  *
  */
 
-G_DEFINE_TYPE (GVfs, g_vfs, G_TYPE_OBJECT);
+struct _GVfsPrivate {
+  GHashTable *additional_schemes;
+};
+
+G_DEFINE_TYPE_WITH_PRIVATE (GVfs, g_vfs, G_TYPE_OBJECT);
+
+static void
+g_vfs_dispose (GObject *object)
+{
+  GVfs *vfs = G_VFS (object);
+  GVfsPrivate *priv = g_vfs_get_instance_private (vfs);
+
+  g_clear_pointer (&priv->additional_schemes, g_hash_table_destroy);
+
+  G_OBJECT_CLASS (g_vfs_parent_class)->dispose (object);
+}
 
 static void
 g_vfs_class_init (GVfsClass *klass)
 {
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  object_class->dispose = g_vfs_dispose;
+}
+
+static GFile *
+resource_get_file_for_uri (GVfs *vfs, const char *uri)
+{
+  return _g_resource_file_new (uri);
 }
 
 static void
 g_vfs_init (GVfs *vfs)
 {
+  GVfsPrivate *priv = g_vfs_get_instance_private (vfs);
+  priv->additional_schemes = g_hash_table_new (g_str_hash, g_str_equal);
+
+  g_vfs_register_uri_scheme (vfs, "resource", resource_get_file_for_uri);
 }
 
 /**
@@ -69,7 +96,6 @@ g_vfs_is_active (GVfs *vfs)
 
   return (* class->is_active) (vfs);
 }
-
 
 /**
  * g_vfs_get_file_for_path:
@@ -95,6 +121,26 @@ g_vfs_get_file_for_path (GVfs       *vfs,
   return (* class->get_file_for_path) (vfs, path);
 }
 
+static GFile *
+get_file_for_uri_internal (GVfs *vfs, const char *uri)
+{
+  GVfsPrivate *priv = g_vfs_get_instance_private (vfs);
+  GFile *ret = NULL;
+  char *scheme;
+  GVfsURILookupFunc func;
+
+  scheme = g_uri_parse_scheme (uri);
+  if (scheme == NULL)
+    return NULL;
+
+  func = g_hash_table_lookup (priv->additional_schemes, scheme);
+  if (func)
+    ret = func (vfs, uri);
+
+  g_free (scheme);
+  return ret;
+}
+
 /**
  * g_vfs_get_file_for_uri:
  * @vfs: a#GVfs.
@@ -114,19 +160,16 @@ g_vfs_get_file_for_uri (GVfs       *vfs,
                         const char *uri)
 {
   GVfsClass *class;
+  GFile *ret;
  
   g_return_val_if_fail (G_IS_VFS (vfs), NULL);
   g_return_val_if_fail (uri != NULL, NULL);
 
   class = G_VFS_GET_CLASS (vfs);
 
-  /* This is an unfortunate placement, but we really
-   * need to check this before chaining to the vfs,
-   * because we want to support resource uris for
-   * all vfs:es, even those that predate resources.
-   */
-  if (g_str_has_prefix (uri, "resource:"))
-    return _g_resource_file_new (uri);
+  ret = get_file_for_uri_internal (vfs, uri);
+  if (ret)
+    return ret;
 
   return (* class->get_file_for_uri) (vfs, uri);
 }
@@ -216,3 +259,13 @@ g_vfs_get_local (void)
 
   return G_VFS (vfs);
 }
+
+void
+g_vfs_register_uri_scheme (GVfs              *vfs,
+                           const char        *scheme,
+                           GVfsURILookupFunc  func)
+{
+  GVfsPrivate *priv = g_vfs_get_instance_private (vfs);
+  g_hash_table_replace (priv->additional_schemes, (gpointer) scheme, func);
+}
+
